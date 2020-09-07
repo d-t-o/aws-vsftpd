@@ -26,14 +26,14 @@ Doing this allows me to use a t3a.nano instance, which at the moment of writing 
 3. Optionally: a free account for [duckdns](https://duckdns.org). If you have one you'll get a static name for your FTP server instead of an IP address, which allows you to have a fixed configuration on the device that writes to the FTP server.
 
 # Usage
-This repository has two folders, one for the docker image of vsftpd, one for the aws stack. Building the docker container is technically not necessary as it could also be taken pre-build from a repository somewhere, but for some reason it feels weird to me to start a container some private person from the internet has built and claims does what he says. Building it takes like 10 seconds if you have your docker environment setup already.
+This repository has two folders, one for the docker image of vsftpd, one for the aws stack. Building the docker container is technically not necessary as it could also be taken pre-built from a repository somewhere, but for some reason it feels weird to me to start a container some private person from the internet has built and claims does what he says. Building it takes like 10 seconds if you have your docker environment setup already.
 
 ## 1. Setup the Docker Repository Stack
-1. Login to your aws account, select the correct region top right, otherwise your server could end up on the wrong continent.
+1. Login to your aws account, select the correct region on the top right, otherwise your server could end up on the wrong continent.
 2. Select *CloudFormation* from the *Services* menu.
 3. Go to *Stacks*, select *Create Stack* and *with new resources*.
-4. Select the *01_ftp.yaml* file from the aws folder for upload.
-5. Enter a name for the stack, e.g. 'dafang-ftp-1' and choose a prefix for your S3 bucket. Make sure it's unique enough it doesn't clash with somebody elses bucket. We'll use *dafang-your_initials* for this sample, which is probably ok. Click *Next* until there's no Next anymore.
+4. Select *upload a template file* and the *01_ftp.yaml* file from the aws folder for upload.
+5. On the next page enter a name for the stack, e.g. 'dafang-ftp-1' and choose a prefix for your S3 bucket. Make sure it's unique enough it doesn't clash with somebody elses bucket. We'll use *dafang-your_initials* for this sample, which is probably ok. Click *Next* until there's no Next anymore.
 
 You should now have a stack in a green status. 
 
@@ -50,8 +50,8 @@ You should now see an image tagged *latest* in the images list.
 ## 3. Launch the FTP server
 * On the aws website select *CloudFormation* from the *Services* menu again.
 * Go to *Stacks*, select *Create Stack* and *with new resources*.
-* Select the *02_ftp.yaml* file from the aws folder for upload.
-* Enter a name for the stack, e.g. *dafang-ftp-2*.
+* Select *upload a template file* and the *02_ftp.yaml* file from the aws folder for upload.
+* On the next page enter a name for the stack, e.g. *dafang-ftp-2*.
 * Fill in the mandatory parameters. 
 
 When I started with this project, I used the same mechanism I use at work to make sure server instances are up and running: start them through an auto scaling group that monitors their availability and whenever a server is not running or answering anymore, start a new one. This is a nice, stable solution but it has one major downside: the load balancer used costs more per hour than the FTP server. Since I wanted a cheap solution, I made this step optional, so you can ignore the *MonitorEc2Instance* part, it's most likely not what you want.
