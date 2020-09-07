@@ -43,7 +43,7 @@ The docker config is mainly taken from [here](https://github.com/delfer/docker-a
 
 * Open a command prompt on your computer in the docker folder and execute ```docker build -t vsftpd .```
 * On the aws website, select *Services*, type *ECR* and select *Elastic Container Registry*. Follow the link and you should see one repository called *vsftpd*. Select it.
-* Click on *View push commands* top right and follow the instructions.
+* Click on *View push commands* on the top right and follow the instructions for your OS.
 
 You should now see an image tagged *latest* in the images list.
 
@@ -67,6 +67,6 @@ You should now have another stack in a green status. Select that stack, click on
 * Select the second stack *dafang-ftp-2*
 * Click on *Delete*, confirm and wait a few seconds.
 
-The stack should be deleted. From this moment on, you only pay for the FTP data still in your S3 bucket plus a super low fee for the docker image still being in the ECR. 
+The stack should be deleted, your FTP server is gone. From this moment on, you only pay for the FTP data still in your S3 bucket plus a super low fee for the docker image still being in the ECR. 
 
 If you also want to get rid of that, also delete the first stack *dafang-ftp-1*. You will have to delete the docker image from the ECR manually though as aws refuses to delete some resources that still contain user data. Also you'll have to manually delete the S3 bucket with the FTP data in it for the same reason.
