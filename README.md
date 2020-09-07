@@ -32,7 +32,7 @@ This repository has two folders, one for the docker image of vsftpd, one for the
 1. Login to your aws account, select the correct region top right, otherwise your server could end up on the wrong continent.
 2. Select *CloudFormation* from the *Services* menu.
 3. Go to *Stacks*, select *Create Stack* and *with new resources*.
-4. Open the *01_ftp.yaml* file from the aws folder.
+4. Select the *01_ftp.yaml* file from the aws folder for upload.
 5. Enter a name for the stack, e.g. 'dafang-ftp-1' and choose a prefix for your S3 bucket. Make sure it's unique enough it doesn't clash with somebody elses bucket. We'll use *dafang-your_initials* for this sample, which is probably ok. Click *Next* until there's no Next anymore.
 
 You should now have a stack in a green status. 
@@ -50,7 +50,7 @@ You should now see an image tagged *latest* in the images list.
 ## 3. Launch the FTP server
 * On the aws website select *CloudFormation* from the *Services* menu again.
 * Go to *Stacks*, select *Create Stack* and *with new resources*.
-* Open the *02_ftp.yaml* file from the aws folder.
+* Select the *02_ftp.yaml* file from the aws folder for upload.
 * Enter a name for the stack, e.g. *dafang-ftp-2*.
 * Fill in the mandatory parameters. 
 
