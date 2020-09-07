@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  BucketNamePrefix:
+    Description: Make this prefix unique as this S3 bucket name can only exist once. Globaly.
+    Type: String
+
+Resources:
+
+  FtpS3Bucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Retain
+      Properties: 
+        BucketEncryption: 
+          ServerSideEncryptionConfiguration: 
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        BucketName: !Sub '${BucketNamePrefix}-ftp-${AWS::Region}'
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 21600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: Ec2-S3Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListAllMyBuckets"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:List*"
+                  - "s3:Get*"
+                  - "s3:PutObject"
+                  - "s3:DeleteObject"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BucketNamePrefix}-*'
+                  - !Sub 'arn:aws:s3:::${BucketNamePrefix}-*/*'
+        - PolicyName: MailPolicy
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Action: 
+                  - ses:SendRawEmail
+                  - ses:SendEmail
+                Resource: "*"
+      RoleName: aws-vsftpd-ec2-role
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: aws-vsftpd-ec2-profile
+      Roles:
+      - !Ref Ec2Role
+
+  # Docker Repository
+  EcrVsftpd:
+    Type: AWS::ECR::Repository
+    Properties:
+      # tags not supported
+      RepositoryName: vsftpd
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 10,
+                "description": "Delete untagged images",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 2
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+
+Outputs:
+  S3Bucket:
+    Value: !Ref FtpS3Bucket
+    Export:
+      Name: vsftpd-FtpS3Bucket
+  Ec2Role:
+    Value: !Ref Ec2Role
+    Export:
+      Name: vsftpd-Ec2Role
+  Ec2InstanceProfile:
+    Value: !Ref Ec2InstanceProfile
+    Export:
+      Name: vsftpd-Ec2InstanceProfile
+  DockerRepositoryUrl:
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrVsftpd}"
+  DockerRepositoryName:
+    Value: !Ref EcrVsftpd
+    Export:
+      Name: vsftpd-DockerRepositoryName

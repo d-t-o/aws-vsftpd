@@ -1,0 +1,448 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  Vpc:
+    Description: In the default account setup you should only have one VPC listed here, use that. If you created more, you'll know which one to use.
+    Type: AWS::EC2::VPC::Id
+
+  Subnet:
+    Description: In the default account setup you can use any of the 3 listed, it doesn't matter
+    Type: AWS::EC2::Subnet::Id
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the vsftpd EC2 instance. Leave empty if you do not want to be able to ssh to your instance.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: Can contain only ASCII characters.
+
+  FtpPort:
+    Description: FTP server port. Use something unusual >1024 so your server will not be hammered by login attempts of evil doers.
+    Type: Number
+    Default: 21121
+
+  ImageId:
+    Description: Defined by Amazon, it varies per region and release. You get this Id from the EC2 launch page, use the latest Amazon Linux 2 identifier of your region.
+    Type: String
+    Default: ami-0c115dbd34c69a004
+
+  NotificationMailAddress:
+    Description: In case your EC2 instance is terminated or restarted, a mail notification is sent to this address. Leave empty if you don't care.
+    Type: String
+
+  FtpUserName:
+    Description: The FTP user you want to login to the FTP server with, defaults to dafang
+    Type: String
+    Default: dafang
+
+  FtpUserPassword:
+    Description: The password for said FTP user
+    Type: String
+
+  DuckDnsDomain:
+    Description: If you want this ftp server to have a static domain name instead of just an ip address, put your duckdns domain name (without the duckdns.org) in here.
+    Type: String
+
+  DuckDnsToken:
+    Description: The token from duckdns, shown to you when you login to duckdns
+    Type: String
+
+  MonitorEc2Instance:
+    Description: If set to True, we make sure the ftp server is running at all time and if it terminates or stops responding, a new one is launched. This costs more than the instance itself though, so it is optional.
+    Type: String
+    Default: False
+    AllowedValues:
+      - False
+      - True
+
+Conditions:
+  sshAccessEnabled: !Not [!Equals [ !Ref KeyName,  AWS::NoValue ]]
+  mailNotificationEnabled: !Not [!Equals [ !Ref NotificationMailAddress,  AWS::NoValue ]]
+  duckDnsEnabled: !Not [!Equals [ !Ref DuckDnsDomain,  AWS::NoValue ]]
+  autoScalingEnabled: !Equals [ !Ref MonitorEc2Instance,  True ]
+  autoScalingDisabled: !Equals [ !Ref MonitorEc2Instance,  False ]
+  autoScalingAndMailEnabled: !And
+    - !Condition mailNotificationEnabled
+    - !Condition autoScalingEnabled
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Mandatory Parameters"
+        Parameters:
+          - FtpUserPassword
+          - Vpc
+          - Subnet
+          - ImageId
+          - MonitorEc2Instance
+      -
+        Label:
+          default: "Optional Parameters (uses defaults or disables feature if not set. It will still work though.)"
+        Parameters:
+          - FtpPort
+          - KeyName
+          - FtpUserName
+          - DuckDnsDomain
+          - DuckDnsToken
+      - Label:
+          default: "Optional Parameter in case you set MonitorEc2Instance to true"
+        Parameters:
+          - NotificationMailAddress
+
+Resources:
+     
+  #SG to allow SSH and HTTP access
+  SecurityGroupEc2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP access
+      SecurityGroupIngress:
+        - CidrIp: !If [sshAccessEnabled, 0.0.0.0/0, 127.0.0.1/0]
+          Description: Allow incoming SSH
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          Description: Allow incoming FTP
+          IpProtocol: tcp
+          FromPort: 21000
+          ToPort: 21010
+        - CidrIp: 0.0.0.0/0
+          Description: Allow incoming FTP
+          IpProtocol: tcp
+          FromPort: !Ref FtpPort
+          ToPort: !Ref FtpPort
+      VpcId: !Ref Vpc
+
+  # the raw EC2 instance, if used without auto scaling
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Condition: autoScalingDisabled
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: "t3a.nano"
+      KeyName: !Ref KeyName
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - !Ref SecurityGroupEc2
+      IamInstanceProfile: !ImportValue vsftpd-Ec2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            yum update
+            #yum upgrade -y
+            yum install -y docker fuse
+
+            amazon-linux-extras install epel
+            yum install -y s3fs-fuse
+
+            systemctl start docker
+            systemctl enable docker
+            usermod -aG docker ec2-user
+
+            # we need to wait for the docker service to start
+            until docker info
+            do
+              sleep 2
+            done
+
+            rm -f /etc/localtime
+            ln -s /usr/share/zoneinfo/Europe/Berlin /etc/localtime
+
+            export REGION=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document |grep \"region\" |sed -e "s%[\",]%%g" |awk '{print $3}'`
+
+            export PUBLIC_IP=`curl http://169.254.169.254/latest/meta-data/public-ipv4`
+
+            export DOCKER_URL=${DockerUrl}
+
+            #set the duckdns ip
+            if [ -z "$DNS_USAGE" ]; then echo "calling https://www.duckdns.org/update?domains=${DNS_DOMAIN}&token=${DNS_TOKEN}&ip=$PUBLIC_IP" && curl "https://www.duckdns.org/update?domains=${DNS_DOMAIN}&token=${DNS_TOKEN}&ip=$PUBLIC_IP" ; else echo "Skipping dns update"; fi
+
+            #install plugin to enable s3 volumes, using the task execution role to access s3.
+            docker plugin install rexray/s3fs:latest  S3FS_REGION=${AWS::Region} S3FS_OPTIONS="allow_other,iam_role=auto,umask=000" LIBSTORAGE_INTEGRATION_VOLUME_OPERATIONS_MOUNT_ROOTPATH=/ --grant-all-permissions
+            echo "rexray plugin installation said: $?"
+
+            # docker login into ECR
+            $(aws ecr get-login --region $REGION --no-include-email)
+            # start vsftpd docker image
+            docker run -d --restart=always -p ${FTP_PORT}:21 -p 21000-21010:21000-21010 -v ${S3_BUCKET}:/ftp -e USERS="${FTP_USER}|${FTP_PASS}" -e ADDRESS=$PUBLIC_IP $DOCKER_URL
+
+          - {
+            DockerUrl: !Join [ "", [ !Sub [ "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DockerRep}", { DockerRep:
+                                                                                                                       !ImportValue vsftpd-DockerRepositoryName } ] ] ],
+            FTP_PORT: !Ref FtpPort,
+            FTP_USER: !Ref FtpUserName,
+            FTP_PASS: !Ref FtpUserPassword,
+            S3_BUCKET: !ImportValue vsftpd-FtpS3Bucket,
+            DNS_USAGE: !If [ duckDnsEnabled, true, AWS::NoValue ],
+            DNS_DOMAIN: !Ref DuckDnsDomain,
+            DNS_TOKEN: !Ref DuckDnsToken
+          }
+
+  # the ftp server launch config
+  DafangLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Condition: autoScalingEnabled
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: "t3a.nano"
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !ImportValue vsftpd-Ec2InstanceProfile
+      SecurityGroups:
+        - Ref: SecurityGroupEc2
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            yum update
+            #yum upgrade -y
+            yum install -y docker fuse
+
+            amazon-linux-extras install epel
+            yum install -y s3fs-fuse
+
+            systemctl start docker
+            systemctl enable docker
+            usermod -aG docker ec2-user
+
+            # we need to wait for the docker service to start
+            until docker info
+            do
+              sleep 2
+            done
+
+            rm -f /etc/localtime
+            ln -s /usr/share/zoneinfo/Europe/Berlin /etc/localtime
+
+            export REGION=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document |grep \"region\" |sed -e "s%[\",]%%g" |awk '{print $3}'`
+
+            export PUBLIC_IP=`curl http://169.254.169.254/latest/meta-data/public-ipv4`
+
+            export DOCKER_URL=${DockerUrl}
+
+            #set the duckdns ip
+            if [ -z "$DNS_USAGE" ]; then echo "calling https://www.duckdns.org/update?domains=${DNS_DOMAIN}&token=${DNS_TOKEN}&ip=$PUBLIC_IP" && curl "https://www.duckdns.org/update?domains=${DNS_DOMAIN}&token=${DNS_TOKEN}&ip=$PUBLIC_IP" ; else echo "Skipping dns update"; fi
+
+            #install plugin to enable s3 volumes, using the task execution role to access s3.
+            docker plugin install rexray/s3fs:latest  S3FS_REGION=${AWS::Region} S3FS_OPTIONS="allow_other,iam_role=auto,umask=000" LIBSTORAGE_INTEGRATION_VOLUME_OPERATIONS_MOUNT_ROOTPATH=/ --grant-all-permissions
+            echo "rexray plugin installation said: $?"
+            
+            # docker login into ECR
+            $(aws ecr get-login --region $REGION --no-include-email)
+            # start vsftpd docker image
+            docker run -d --restart=always -p ${FTP_PORT}:21 -p 21000-21010:21000-21010 -v ${S3_BUCKET}:/ftp -e USERS="${FTP_USER}|${FTP_PASS}" -e ADDRESS=$PUBLIC_IP $DOCKER_URL
+
+          - {
+            DockerUrl: !Join [ "", [ !Sub [ "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${DockerRep}", { DockerRep:
+                                                                                                                       !ImportValue vsftpd-DockerRepositoryName } ] ] ],
+            FTP_PORT: !Ref FtpPort,
+            FTP_USER: !Ref FtpUserName,
+            FTP_PASS: !Ref FtpUserPassword,
+            S3_BUCKET: !ImportValue vsftpd-FtpS3Bucket,
+            DNS_USAGE: !If [duckDnsEnabled, true, AWS::NoValue],
+            DNS_DOMAIN: !Ref DuckDnsDomain,
+            DNS_TOKEN: !Ref DuckDnsToken
+          }
+
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: autoScalingEnabled
+    Properties:
+      Name: DafangLoadBalancer
+      Subnets:
+        - !Ref Subnet
+      Type: network
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: autoScalingEnabled
+    Properties:
+      DefaultActions:
+      - TargetGroupArn: !Ref TargetGroup
+        Type: forward
+      LoadBalancerArn: !Ref NetworkLoadBalancer
+      Port: !Ref FtpPort
+      Protocol: TCP
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: autoScalingEnabled
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      Port: !Ref FtpPort
+      Protocol: TCP
+      VpcId: !Ref Vpc
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: autoScalingEnabled
+    Properties:
+      VPCZoneIdentifier:
+      - !Ref Subnet
+      LaunchConfigurationName:
+        !Ref DafangLaunchConfig
+      MinSize: '1'
+      MaxSize: '1'
+      TargetGroupARNs:
+      - !Ref TargetGroup
+      Tags:
+      - Key: Name
+        Value: 'dafang'
+        PropagateAtLaunch: true
+      MetricsCollection:
+      - Granularity: 1Minute
+      NotificationConfigurations:
+      - TopicARN: !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+        NotificationTypes:
+          - autoscaling:EC2_INSTANCE_LAUNCH
+          - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+          - autoscaling:EC2_INSTANCE_TERMINATE
+          - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+
+  CloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: autoScalingEnabled
+    Properties:
+      DashboardName: !Sub ${AWS::StackName}-${AWS::Region}
+      DashboardBody: !Sub |
+        {
+           "widgets": [
+               {
+                   "type": "metric",
+                   "x": 0,
+                   "y": 0,
+                   "width": 24,
+                   "height": 6,
+                   "properties": {
+                       "metrics": [
+                           [ "AWS/NetworkELB", "HealthyHostCount", "TargetGroup", "${TargetGroup.TargetGroupFullName}", "LoadBalancer", "${NetworkLoadBalancer.LoadBalancerFullName}", { "color": "#2ca02c", "stat": "Minimum" } ],
+                           [ ".", "UnHealthyHostCount", ".", ".", ".", ".", { "color": "#d62728", "stat": "Maximum" } ]
+                       ],
+                       "view": "timeSeries",
+                       "region": "${AWS::Region}",
+                       "stacked": false,
+                       "title": "Network Load Balancer Health",
+                       "period": 300,
+                       "yAxis": {
+                           "left": {
+                               "label": "Instances",
+                               "showUnits": false
+                           }
+                       }
+                   }
+               },
+               {
+                   "type": "metric",
+                   "x": 0,
+                   "y": 6,
+                   "width": 24,
+                   "height": 6,
+                   "properties": {
+                       "metrics": [
+                           [ "AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${AutoScalingGroup}", { "stat": "Minimum", "color": "#2ca02c" } ]
+                       ],
+                       "view": "timeSeries",
+                       "region": "${AWS::Region}",
+                       "stacked": false,
+                       "title": "Auto Scaling Group Health",
+                       "period": 300,
+                       "yAxis": {
+                           "left": {
+                               "label": "Instances",
+                               "showUnits": false
+                           }
+                       }
+                   }
+               }
+           ]
+        }
+
+
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: autoScalingAndMailEnabled
+    Properties:
+      Subscription:
+      - Endpoint: !Ref NotificationMailAddress
+        Protocol: email
+
+  CloudWatchAlarmAsg:
+    Type: AWS::CloudWatch::Alarm
+    Condition: autoScalingEnabled
+    Properties:
+      AlarmActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      AlarmDescription: Healthy dafang ftp instances, seen from the Auto Scaling Group
+      AlarmName: !Sub ${AWS::StackName}-OutageAsg
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      InsufficientDataActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      MetricName: GroupInServiceInstances
+      Namespace: AWS/AutoScaling
+      OKActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      TreatMissingData: ignore
+      Unit: Count
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      
+  CloudWatchAlarmNlb:
+    Type: AWS::CloudWatch::Alarm
+    Condition: autoScalingEnabled
+    Properties:
+      AlarmActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      AlarmDescription: Healthy dafang ftp instances, seen from the Network Load Balancer
+      AlarmName: !Sub ${AWS::StackName}-OutageNlb
+      ComparisonOperator: LessThanThreshold
+      EvaluationPeriods: 1
+      InsufficientDataActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      MetricName: HealthyHostCount
+      Namespace: AWS/NetworkELB
+      OKActions:
+        - !If [mailNotificationEnabled, !Ref AlarmNotificationTopic, AWS::NoValue]
+      Period: 300
+      Statistic: Minimum
+      Threshold: 1
+      TreatMissingData: ignore
+      Unit: Count
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt NetworkLoadBalancer.LoadBalancerFullName
+          
+Outputs:
+  NetworkLoadBalancer:
+    Condition: autoScalingEnabled
+    Value: !Ref NetworkLoadBalancer
+  NetworkLoadBalancerDns:
+    Condition: autoScalingEnabled
+    Value: !Sub ${NetworkLoadBalancer.DNSName}
+  AutoScalingGroup:
+    Condition: autoScalingEnabled
+    Value: !Ref AutoScalingGroup
+  FtpServer:
+    Condition: autoScalingDisabled
+    Value: !Sub
+      - |
+        ftp://${user}:${pass}@${serverDomain}:${serverPort}
+      - {
+        serverDomain: !If [duckDnsEnabled,
+                           !Sub "${DuckDnsDomain}.duckdns.org",
+                           !Sub "${Ec2Instance.PublicIp}"],
+        serverPort: !Ref FtpPort,
+        user: !Ref FtpUserName,
+        pass: !Ref FtpUserPassword
+      }
+  Ec2Instance:
+    Condition: autoScalingDisabled
+    Value: !Sub "${Ec2Instance.PublicIp}"
